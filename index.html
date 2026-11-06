@@ -147,6 +147,10 @@ input[type=range]{width:100%;accent-color:var(--acc);min-height:32px}
 <option value="y">Chấm theo ý chính</option>
 <option value="chat">Chấm sát nguyên văn</option>
 </select>
+<select id="sttMode" aria-label="Cách nhận giọng nói" style="width:auto">
+<option value="browser">Nhận giọng nói: trình duyệt</option>
+<option value="gemini">Nhận giọng nói: Gemini nghe trực tiếp</option>
+</select>
 <button id="hideBtn" type="button">Ẩn bài khi đọc</button>
 </div>
 </div>
@@ -480,39 +484,137 @@ $('clozeCheck').onclick=function(){
 var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 var rec=null,recording=false,finalText='',interim='',busy=false;
 var status=$('status'),recBtn=$('recBtn'),live=$('live');
-if(!SR)status.textContent='Trình duyệt chưa hỗ trợ ghi âm. Hãy dùng Chrome hoặc Safari, hoặc gõ nội dung vào ô bên dưới.';
 $('hideBtn').onclick=function(){var h=$('lessonCard').classList.toggle('hide');this.textContent=h?'Hiện bài':'Ẩn bài khi đọc'};
-recBtn.onclick=function(){
-  if(!SR)return;
-  if(recording){stop();return}
+var sttMode=$('sttMode'),audioMode=false,netErr=false,fatal=false,retries=0;
+var mr=null,mstream=null,chunks=[],audioBlob=null,stopResolve=null,t0=0;
+if(!SR){sttMode.value='gemini';status.textContent='Trình duyệt chưa hỗ trợ nhận giọng nói nên đã chuyển sang chế độ Gemini nghe trực tiếp (cần khóa Gemini). Bạn cũng có thể gõ nội dung vào ô bên dưới.'}
+
+function startSR(){
   rec=new SR();rec.lang='vi-VN';rec.continuous=true;rec.interimResults=true;
-  finalText='';interim='';live.textContent='';
-  rec.onresult=function(e){interim='';
+  rec.onresult=function(e){
+    retries=0;interim='';
     for(var i=e.resultIndex;i<e.results.length;i++){var r=e.results[i];if(r.isFinal)finalText+=r[0].transcript+' ';else interim+=r[0].transcript}
-    live.textContent=finalText+interim};
-  rec.onerror=function(e){var m={'not-allowed':'Chưa cấp quyền micro. Hãy cho phép micro hoặc gõ nội dung vào ô bên dưới.','no-speech':'Không nghe thấy giọng nói. Thử lại gần micro hơn.','network':'Mất kết nối khi nhận giọng nói.'};status.textContent=m[e.error]||('Lỗi ghi âm: '+e.error)};
-  rec.onend=function(){if(recording){try{rec.start()}catch(x){}}};
-  try{rec.start();recording=true;recBtn.textContent='⏹ Dừng ghi âm';recBtn.className='rec';status.innerHTML='<span class="dot"></span>Đang nghe… hãy đọc bài.'}
-  catch(x){status.textContent='Không bật được micro.'}
+    live.textContent=finalText+interim;
+  };
+  rec.onerror=function(e){
+    if(e.error==='network'){netErr=true;return}
+    if(e.error==='no-speech'||e.error==='aborted')return;
+    fatal=true;
+    var m={'not-allowed':'Chưa cấp quyền micro. Hãy cho phép micro hoặc gõ nội dung vào ô bên dưới.','service-not-allowed':'Trình duyệt không cho dùng nhận giọng nói. Hãy thử Chrome hoặc chuyển sang chế độ Gemini.','audio-capture':'Không tìm thấy micro.','language-not-supported':'Trình duyệt chưa hỗ trợ nhận giọng nói tiếng Việt. Hãy chuyển sang chế độ Gemini.'};
+    status.textContent=m[e.error]||('Lỗi ghi âm: '+e.error);
+  };
+  rec.onend=function(){
+    if(!recording)return;
+    if(fatal){stop(true);return}
+    if(netErr){
+      netErr=false;
+      if(retries<3){retries++;status.innerHTML='<span class="dot"></span>Mất kết nối, đang nối lại ('+retries+'/3)…';setTimeout(function(){if(recording)startSR()},1000);return}
+      stop(true);
+      status.textContent='Mất kết nối tới dịch vụ nhận giọng nói của trình duyệt'+(location.protocol==='file:'?' (trang đang mở từ file, cần mở qua https hoặc localhost)':'')+'. Phần đã nhận vẫn được giữ lại. Bạn có thể bấm “Chấm bài”, ghi lại, chuyển sang “Gemini nghe trực tiếp”, hoặc gõ tay.';
+      return;
+    }
+    startSR();
+  };
+  try{rec.start()}catch(x){}
+}
+async function startAudio(){
+  if(!navigator.mediaDevices||!window.MediaRecorder){status.textContent='Trình duyệt chưa hỗ trợ ghi âm. Hãy gõ nội dung vào ô bên dưới.';return}
+  try{mstream=await navigator.mediaDevices.getUserMedia({audio:true})}
+  catch(x){status.textContent='Chưa cấp quyền micro. Hãy cho phép micro hoặc gõ nội dung vào ô bên dưới.';return}
+  chunks=[];audioBlob=null;mr=new MediaRecorder(mstream);
+  mr.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
+  mr.onstop=function(){
+    audioBlob=new Blob(chunks,{type:mr.mimeType||'audio/webm'});
+    mstream.getTracks().forEach(function(t){t.stop()});
+    status.textContent='Đã ghi '+Math.round((Date.now()-t0)/1000)+' giây. Bấm “Chấm bài”.';
+    if(stopResolve){stopResolve();stopResolve=null}
+  };
+  mr.start();t0=Date.now();recording=true;audioMode=true;
+  recBtn.textContent='⏹ Dừng ghi âm';recBtn.className='rec';
+  status.innerHTML='<span class="dot"></span>Đang ghi âm… Gemini sẽ nghe lại khi bạn bấm “Chấm bài”.';
+  live.textContent='Đang ghi âm. Nội dung sẽ được Gemini nghe và chép lại khi chấm.';
+}
+function stopAudio(){
+  return new Promise(function(res){
+    recording=false;recBtn.textContent='🎙 Ghi âm lại';recBtn.className='primary';
+    if(mr&&mr.state!=='inactive'){stopResolve=res;mr.stop()}else res();
+  });
+}
+recBtn.onclick=function(){
+  if(recording){if(audioMode)stopAudio();else stop();return}
+  finalText='';interim='';live.textContent='';audioBlob=null;netErr=false;fatal=false;retries=0;
+  if(sttMode.value==='gemini'){startAudio();return}
+  if(!SR)return;
+  audioMode=false;recording=true;
+  recBtn.textContent='⏹ Dừng ghi âm';recBtn.className='rec';
+  status.innerHTML='<span class="dot"></span>Đang nghe… hãy đọc bài.';
+  startSR();
 };
-function stop(){recording=false;if(rec){try{rec.stop()}catch(x){}}recBtn.textContent='🎙 Ghi âm lại';recBtn.className='primary';status.textContent='Đã dừng. Bấm “Chấm bài” để AI phân tích.'}
+function stop(keep){
+  recording=false;if(rec){try{rec.stop()}catch(x){}}
+  if(interim){finalText+=interim+' ';interim='';live.textContent=finalText}
+  recBtn.textContent='🎙 Ghi âm lại';recBtn.className='primary';
+  if(!keep)status.textContent='Đã dừng. Bấm “Chấm bài” để AI phân tích.';
+}
+/* chuyển bản ghi sang WAV 16 kHz mono để gửi cho Gemini */
+async function toWavB64(blob){
+  var buf=await blob.arrayBuffer(),AC=window.AudioContext||window.webkitAudioContext,ctx=new AC(),dec;
+  try{dec=await new Promise(function(ok,no){ctx.decodeAudioData(buf,ok,no)})}catch(x){throw{code:'decode'}}
+  if(ctx.close)ctx.close();
+  if(dec.duration>420)throw{code:'toolong'};
+  var rate=16000,OAC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+  var off=new OAC(1,Math.ceil(dec.duration*rate),rate),node=off.createBufferSource();
+  node.buffer=dec;node.connect(off.destination);node.start();
+  var d=(await off.startRendering()).getChannelData(0),dv=new DataView(new ArrayBuffer(44+d.length*2));
+  function ws(o,t){for(var i=0;i<t.length;i++)dv.setUint8(o+i,t.charCodeAt(i))}
+  ws(0,'RIFF');dv.setUint32(4,36+d.length*2,true);ws(8,'WAVE');ws(12,'fmt ');dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,1,true);dv.setUint32(24,rate,true);dv.setUint32(28,rate*2,true);dv.setUint16(32,2,true);dv.setUint16(34,16,true);ws(36,'data');dv.setUint32(40,d.length*2,true);
+  for(var i=0;i<d.length;i++){var v=Math.max(-1,Math.min(1,d[i]));dv.setInt16(44+i*2,v<0?v*0x8000:v*0x7fff,true)}
+  var bytes=new Uint8Array(dv.buffer),bin='';
+  for(var j=0;j<bytes.length;j+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(j,j+0x8000));
+  return btoa(bin);
+}
+async function askGeminiAudio(prompt,b64){
+  var key=getKey('gemini'),model=lsGet('hb_model_gemini')||MODELS.gemini[0][0];
+  if(!key)throw{code:'nokey'};
+  var res=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+model+':generateContent',{
+    method:'POST',headers:{'content-type':'application/json','x-goog-api-key':key},
+    body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt},{inline_data:{mime_type:'audio/wav',data:b64}}]}],generationConfig:{maxOutputTokens:8192,responseMimeType:'application/json'}})
+  });
+  if(!res.ok)await failFrom(res);
+  var g=await res.json(),parts=(g.candidates&&g.candidates[0]&&g.candidates[0].content&&g.candidates[0].content.parts)||[];
+  return parseJson(parts.map(function(x){return x.text||''}).join(''));
+}
 $('resetBtn').onclick=function(){
   if(recording)stop();
-  finalText='';interim='';live.textContent='';$('manual').value='';$('result').classList.add('hide');
+  finalText='';interim='';live.textContent='';$('manual').value='';audioBlob=null;$('result').classList.add('hide');
   $('lessonCard').classList.remove('hide');$('hideBtn').textContent='Ẩn bài khi đọc';
   recBtn.textContent='🎙 Bắt đầu ghi âm';recBtn.className='primary';
   status.textContent='Bấm ghi âm, đọc bài không nhìn sách, rồi bấm dừng.';
 };
 $('checkBtn').onclick=async function(){
-  if(busy)return;if(recording)stop();
-  var orig=src.value.trim(),spoken=($('manual').value.trim()||(finalText+interim)).trim();
+  if(busy)return;
+  if(recording){if(audioMode)await stopAudio();else stop()}
+  var orig=src.value.trim(),manual=$('manual').value.trim();
+  var useAudio=!manual&&!!audioBlob&&audioMode;
+  var spoken=manual||(finalText+interim).trim();
   if(!orig){status.textContent='Hãy dán bài cần thuộc trước.';return}
-  if(!spoken){status.textContent='Chưa có nội dung đã đọc.';return}
+  if(!spoken&&!useAudio){status.textContent='Chưa có nội dung đã đọc.';return}
+  if(useAudio)spoken='(Học sinh đọc trong file âm thanh đính kèm. Hãy nghe và chép lại thật chính xác từng từ vào trường "transcript", rồi chấm dựa trên bản chép đó.)';
   busy=true;this.disabled=true;status.innerHTML='<span class="dot"></span>AI đang nghe lại và phân tích…';
   var strict=$('mode').value==='chat';
   var prompt='Bạn là giáo viên chấm bài thuộc lòng bằng tiếng Việt, nghiêm túc nhưng khích lệ.\n\nBÀI GỐC:\n"""\n'+orig+'\n"""\n\nHỌC SINH ĐỌC (văn bản chuyển từ giọng nói nên có thể sai chính tả, thiếu dấu câu, nghe nhầm từ đồng âm; đừng trừ điểm cho lỗi nhận dạng giọng nói rõ ràng):\n"""\n'+spoken+'\n"""\n\nKIỂU CHẤM: '+(strict?'sát nguyên văn. Diễn đạt khác với bài gốc vẫn bị coi là chưa chính xác; thuật ngữ, số liệu, tên riêng, công thức phải đúng.':'theo ý chính. Cho điểm khi nêu đủ và đúng ý, kể cả diễn đạt khác; chỉ trừ điểm khi thiếu ý, sai ý hoặc sai số liệu, tên riêng, thuật ngữ quan trọng.')+'\n\nHãy: (1) tách bài gốc thành 3-10 ý/đoạn chính theo thứ tự; (2) đối chiếu từng ý: đủ, một phần, thiếu hay sai; (3) chỉ ra từng chỗ nói sai kèm đáp án đúng; (4) đưa 2-5 lời nhắc cụ thể để ôn tốt hơn; (5) tính điểm 0-100 phản ánh mức độ thuộc.\n\nCHỈ trả về JSON hợp lệ, không thêm chữ nào khác:\n{"score":number,"verdict":"một câu ngắn","summary":"1-2 câu nhận xét chung","points":[{"idea":"ý trong bài gốc","status":"du|mot_phan|thieu|sai","heard":"học sinh đã nói gì (rút gọn, để trống nếu thiếu)","note":"nhận xét ngắn"}],"errors":[{"said":"phần nói sai","correct":"đáp án đúng","why":"giải thích ngắn"}],"reminders":["lời nhắc cụ thể"]}';
-  try{render(await askClaude(prompt,3000));status.textContent='Xong. Bấm “Làm lại” để đọc lần nữa.'}
-  catch(e){status.textContent=errMsg(e)}
+  try{
+    var r;
+    if(useAudio){
+      status.innerHTML='<span class="dot"></span>Đang xử lý âm thanh…';
+      r=await askGeminiAudio(prompt+'\nLưu ý: thêm trường "transcript" (chuỗi) vào JSON, là nội dung bạn nghe được.',await toWavB64(audioBlob));
+      if(r.transcript)live.textContent=r.transcript;
+    }else r=await askClaude(prompt,3000);
+    render(r);status.textContent='Xong. Bấm “Làm lại” để đọc lần nữa.';
+  }catch(e){
+    var c=e&&e.code;
+    status.textContent=useAudio&&c==='nokey'?'Chế độ này cần khóa Gemini. Vào tab Cài đặt, chọn Gemini và nhập khóa.':c==='toolong'?'Bản ghi quá dài (tối đa khoảng 7 phút). Hãy chia bài ra từng phần.':c==='decode'?'Không đọc được bản ghi âm. Hãy ghi lại hoặc gõ nội dung vào ô bên dưới.':errMsg(e);
+  }
   busy=false;this.disabled=false;
 };
 function render(r){
