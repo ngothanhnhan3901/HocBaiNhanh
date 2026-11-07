@@ -184,6 +184,10 @@ input[type=range]::-moz-range-thumb{width:30px;height:30px;border-radius:50%;bac
 
 @media (max-width:560px){button,.btn{padding:11px 18px}.tabs{padding:4px;border-radius:26px}.tabs button{padding:8px 2px;border-radius:22px}}
 @media (prefers-reduced-motion:reduce){button,.btn{transition:none}button:hover:not(:disabled),.btn:hover,button:active:not(:disabled){transform:none}}
+.alert{margin-top:12px;padding:12px 16px;border-radius:18px;font-weight:700;line-height:1.5;border:1px solid transparent}
+.alert.bad{background:var(--badbg);color:var(--bad);border-color:var(--bad)}
+.alert.warn{background:var(--midbg);color:var(--mid);border-color:var(--mid)}
+.alert button{margin:6px 0 0 8px;min-height:38px;padding:6px 16px}
 @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){.card,button,.btn,.tabs,.tg,textarea,select{background:var(--card)}button.primary{background:linear-gradient(135deg,var(--acc),var(--acc2))}button.rec{background:var(--bad)}}
 </style>
 </head>
@@ -302,6 +306,7 @@ input[type=range]::-moz-range-thumb{width:30px;height:30px;border-radius:50%;bac
 <button id="checkBtn" type="button">Chấm bài</button>
 <button id="resetBtn" type="button">Làm lại</button>
 </div>
+<div class="alert hide" id="recAlert" role="alert"></div>
 <p class="mute" id="status" style="margin:8px 0">Bấm ghi âm, đọc bài không nhìn sách, rồi bấm dừng.</p>
 <div class="live" id="live" aria-live="polite"></div>
 <div class="hintbox"><div class="row" style="margin-top:0;justify-content:space-between"><b>💡 Nhắc bài</b><span class="mute" id="hintMeta"></span></div>
@@ -794,7 +799,7 @@ $('dictBtn').onclick=async function(){
       dictMr=new MediaRecorder(dictStream);
       dictMr.ondataavailable=function(e){if(e.data&&e.data.size)dictChunks.push(e.data)};
       dictMr.start();
-    }catch(x){dictMsg('Chưa cấp quyền micro. Hãy cho phép micro rồi thử lại.');return}
+    }catch(x){dictMsg(micMsg(micErrCode(x)));return}
   }else if(!SR){dictMsg('Trình duyệt chưa hỗ trợ ghi âm.');return}
   dictOn=true;btn.textContent='⏹ Dừng và chuyển thành chữ';btn.className='rec';
   live.classList.remove('hide');live.textContent='Đang nghe… hãy đọc nội dung bài.';dictMsg('');
@@ -1010,7 +1015,7 @@ $('nxMic').onclick=async function(){
         nxFinish();
       };
       nxMr.start();$('nxAns').innerHTML='<span class="mute">Đang ghi âm… bấm “Dừng” khi đọc xong.</span>';
-    }catch(x){nxListening=false;nxMic(false);$('nxMsg').textContent='Chưa cấp quyền micro. Hãy cho phép micro hoặc gõ câu vào mục bên dưới.'}
+    }catch(x){nxListening=false;nxMic(false);$('nxMsg').textContent=micMsg(micErrCode(x))}
   }
 };
 function nxLog(){
@@ -1306,7 +1311,7 @@ function startSR(cap){
     if(e.error==='no-speech'||e.error==='aborted')return;
     fatal=true;
     var m={'not-allowed':'Chưa cấp quyền micro. Hãy cho phép micro hoặc gõ nội dung vào ô bên dưới.','service-not-allowed':'Trình duyệt không cho dùng nhận giọng nói. Hãy thử Chrome hoặc chuyển sang chế độ Gemini.','audio-capture':'Không tìm thấy micro.','language-not-supported':'Trình duyệt chưa hỗ trợ nhận giọng nói tiếng Việt. Hãy chuyển sang chế độ Gemini.'};
-    status.textContent=m[e.error]||('Lỗi ghi âm: '+e.error);
+    recAlert(m[e.error]||('Lỗi ghi âm: '+e.error));
   };
   rec.onend=function(){
     if(!recording)return;
@@ -1319,7 +1324,7 @@ function startSR(cap){
       netErr=false;
       if(retries<3){retries++;status.innerHTML='<span class="dot"></span>Mất kết nối, đang nối lại ('+retries+'/3)…';setTimeout(function(){if(recording)startSR()},1000);return}
       netFailed=true;stop(true);
-      status.textContent='Mất kết nối tới dịch vụ nhận giọng nói của trình duyệt'+(location.protocol==='file:'?' (trang đang mở từ file, cần mở qua https hoặc localhost)':'')+'. Trang đã lưu bản ghi âm của bạn: bấm “Chấm bài” để Gemini nghe trực tiếp (cần khóa Gemini ở tab Cài đặt). Hoặc gõ nội dung vào ô bên dưới.';
+      recAlert('Mất kết nối tới dịch vụ nhận giọng nói của trình duyệt'+(location.protocol==='file:'?' (trang đang mở từ file, cần mở qua https hoặc localhost)':'')+'. Trang đã lưu bản ghi âm của bạn: bấm “Chấm bài” để Gemini nghe trực tiếp (cần khóa Gemini ở tab Cài đặt). Hoặc gõ nội dung vào ô bên dưới.','warn');
       return;
     }
     startSR();
@@ -1327,33 +1332,67 @@ function startSR(cap){
   try{rec.start()}catch(x){}
 }
 var mediaDone=Promise.resolve(),netFailed=false;
-async function beginMedia(){
-  if(!navigator.mediaDevices||!window.MediaRecorder)return 'nosupport';
-  try{mstream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(x){return 'denied'}
-  chunks=[];audioBlob=null;mr=new MediaRecorder(mstream);
-  mr.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
-  mr.onstop=function(){
-    audioBlob=new Blob(chunks,{type:mr.mimeType||'audio/webm'});
-    mstream.getTracks().forEach(function(t){t.stop()});
-    if(audioMode)status.textContent='Đã ghi '+Math.round((Date.now()-t0)/1000)+' giây. Bấm “Chấm bài”.';
-    if(stopResolve){stopResolve();stopResolve=null}
+var IN_APP=/FBAN|FBAV|FB_IAB|Zalo|Instagram|Messenger|Line\//i.test(navigator.userAgent||'');
+function micErrCode(e){
+  var n=(e&&e.name)||'';
+  if(n==='NotAllowedError'||n==='SecurityError'||n==='PermissionDeniedError')return 'denied';
+  if(n==='NotFoundError'||n==='DevicesNotFoundError'||n==='OverconstrainedError')return 'nomic';
+  if(n==='NotReadableError'||n==='TrackStartError'||n==='AbortError')return 'busy';
+  return 'fail';
+}
+function micMsg(c){
+  var m={
+    denied:'Micro đang bị chặn cho trang này. Bấm biểu tượng ổ khóa (hoặc nút cài đặt trang) cạnh địa chỉ web, chọn Cho phép Micro, rồi tải lại trang.'+(IN_APP?' Bạn đang mở trong trình duyệt của ứng dụng (Zalo, Facebook…), hãy mở bằng Chrome hoặc Safari.':''),
+    nomic:'Không tìm thấy micro trên thiết bị này. Hãy cắm micro hoặc kiểm tra cài đặt âm thanh.',
+    busy:'Micro đang được ứng dụng khác dùng. Hãy tắt ứng dụng đó (Zoom, Meet, Zalo…) rồi thử lại.',
+    nosupport:'Trình duyệt này chưa hỗ trợ ghi âm. Hãy dùng Chrome hoặc Safari bản mới, hoặc gõ nội dung vào ô bên dưới.'+(IN_APP?' Nếu đang mở trong Zalo hay Facebook, hãy mở bằng Chrome hoặc Safari.':''),
+    insecure:'Trang cần được mở bằng https (hoặc localhost) thì mới dùng được micro.',
+    fail:'Không bật được micro. Hãy thử lại hoặc dùng trình duyệt khác.'
   };
-  mr.start();t0=Date.now();return 'ok';
+  return m[c]||m.fail;
+}
+function recAlert(msg,kind,go){
+  var el=$('recAlert');
+  if(!msg){el.className='alert hide';el.textContent='';return}
+  el.className='alert '+(kind||'bad');
+  el.innerHTML=esc(msg)+(go==='set'?' <button type="button" data-go="set">Mở Cài đặt</button>':'');
+  if(el.scrollIntoView)el.scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+$('recAlert').onclick=function(e){var b=e.target.closest('button');if(b&&b.dataset.go)show(b.dataset.go)};
+async function beginMedia(){
+  if(window.isSecureContext===false)return 'insecure';
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!window.MediaRecorder)return 'nosupport';
+  try{mstream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(x){return micErrCode(x)}
+  try{
+    chunks=[];audioBlob=null;mr=new MediaRecorder(mstream);
+    mr.ondataavailable=function(e){if(e.data&&e.data.size)chunks.push(e.data)};
+    mr.onstop=function(){
+      audioBlob=new Blob(chunks,{type:mr.mimeType||'audio/webm'});
+      mstream.getTracks().forEach(function(t){t.stop()});
+      if(audioMode)status.textContent='Đã ghi '+Math.round((Date.now()-t0)/1000)+' giây. Bấm “Chấm bài”.';
+      if(stopResolve){stopResolve();stopResolve=null}
+    };
+    mr.start();t0=Date.now();return 'ok';
+  }catch(x){try{mstream.getTracks().forEach(function(t){t.stop()})}catch(y){}return 'fail'}
 }
 function endMedia(){
   if(mr&&mr.state!=='inactive'){mediaDone=new Promise(function(res){stopResolve=res;mr.stop()})}
   return mediaDone;
 }
 async function startAudio(){
-  if(!getKey('gemini')){status.textContent='Chế độ Gemini cần khóa Gemini. Vào tab Cài đặt, chọn Gemini và nhập khóa (lấy miễn phí tại aistudio.google.com/apikey).';return}
+  recBtn.disabled=true;recBtn.textContent='⏳ Đang xin quyền micro…';
+  status.textContent='Nếu trình duyệt hỏi quyền dùng micro, hãy bấm Cho phép.';
   var r=await beginMedia();
-  if(r!=='ok'){status.textContent=r==='denied'?'Chưa cấp quyền micro. Hãy cho phép micro hoặc gõ nội dung vào ô bên dưới.':'Trình duyệt chưa hỗ trợ ghi âm. Hãy gõ nội dung vào ô bên dưới.';return}
+  recBtn.disabled=false;
+  if(r!=='ok'){recBtn.textContent='🎙 Bắt đầu ghi âm';recAlert(micMsg(r));status.textContent='Chưa ghi âm được.';return}
+  recAlert('');
   recording=true;audioMode=true;
   recBtn.textContent='⏹ Dừng ghi âm';recBtn.className='rec';
   status.innerHTML='<span class="dot"></span>Đang ghi âm… Gemini sẽ nghe lại khi bạn bấm “Chấm bài”.';
   capFail=false;
   if(SR&&$('capOn').checked){live.textContent='Đang nghe… chữ sẽ hiện khi bạn đọc.';startSR(true)}
   else live.textContent='Đang ghi âm. Nội dung sẽ được Gemini nghe và chép lại khi chấm.';
+  if(!getKey('gemini'))recAlert('Bạn chưa có khóa Gemini nên chưa chấm được. Cứ đọc đi, bản ghi sẽ được giữ lại, thêm khóa ở tab Cài đặt rồi bấm “Chấm bài”.','warn','set');
 }
 function stopAudio(){
   recording=false;if(rec){try{rec.stop()}catch(x){}}recBtn.textContent='🎙 Ghi âm lại';recBtn.className='primary';
@@ -1361,13 +1400,13 @@ function stopAudio(){
 }
 recBtn.onclick=function(){
   if(recording){if(audioMode)stopAudio();else stop();return}
-  finalText='';interim='';live.textContent='';audioBlob=null;netErr=false;fatal=false;retries=0;netFailed=false;hasResult=false;buildHintCtx();hintCtx.pos=0;clearHintShow();
+  finalText='';interim='';live.textContent='';audioBlob=null;netErr=false;fatal=false;retries=0;netFailed=false;hasResult=false;recAlert('');buildHintCtx();hintCtx.pos=0;clearHintShow();
   var noKeyNote='';
   if(sttMode.value==='gemini'){
     if(getKey('gemini')||!SR){startAudio();return}
     noKeyNote='chưa có khóa Gemini nên tạm dùng nhận giọng nói của trình duyệt';
   }
-  if(!SR){status.textContent='Trình duyệt chưa hỗ trợ nhận giọng nói. Hãy chọn chế độ Gemini nghe trực tiếp.';return}
+  if(!SR){recAlert('Trình duyệt chưa hỗ trợ nhận giọng nói. Hãy chọn “Nhận giọng nói: Gemini nghe” ở ô chọn phía trên.');return}
   audioMode=false;recording=true;
   recBtn.textContent='⏹ Dừng ghi âm';recBtn.className='rec';
   status.innerHTML='<span class="dot"></span>Đang nghe… hãy đọc bài.'+(noKeyNote?' <span class="mute">('+noKeyNote+'. Thêm khóa ở tab Cài đặt để Gemini nghe.)</span>':'');
@@ -1413,7 +1452,7 @@ async function askGeminiAudio(prompt,b64,asText){
 $('resetBtn').onclick=function(){
   if(recording){if(audioMode)stopAudio();else stop()}
   finalText='';interim='';live.textContent='';$('manual').value='';audioBlob=null;$('result').classList.add('hide');
-  lessonShown=false;applyLessonVis();hintReset();
+  lessonShown=false;applyLessonVis();hintReset();recAlert('');
   recBtn.textContent='🎙 Bắt đầu ghi âm';recBtn.className='primary';
   status.textContent='Bấm ghi âm, đọc bài không nhìn sách, rồi bấm dừng.';
 };
@@ -1446,6 +1485,7 @@ $('checkBtn').onclick=async function(){
     status.textContent='Xong.'+(saved?' Đã lưu vào Nhật ký.':'')+' Bấm “Làm lại” để đọc lần nữa.';
   }catch(e){
     var c=e&&e.code;
+    if(useAudio&&c==='nokey')recAlert('Chế độ Gemini cần khóa Gemini. Bản ghi của bạn vẫn được giữ, hãy thêm khóa ở tab Cài đặt rồi bấm “Chấm bài” lại.','warn','set');
     status.textContent=useAudio&&c==='nokey'?'Chế độ này cần khóa Gemini. Vào tab Cài đặt, chọn Gemini và nhập khóa.':c==='toolong'?'Bản ghi quá dài (tối đa khoảng 7 phút). Hãy chia bài ra từng phần.':c==='decode'?'Không đọc được bản ghi âm. Hãy ghi lại hoặc gõ nội dung vào ô bên dưới.':errMsg(e);
   }
   busy=false;this.disabled=false;
